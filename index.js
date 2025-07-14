@@ -6,7 +6,12 @@ const axios = require('axios');
 require('dotenv').config();
 
 const app = express();
-app.use(cors());
+
+// ✅ CORS setup (ONLY ONCE)
+app.use(cors({
+  origin: '*', // Allow all origins; restrict in prod
+  methods: ['GET', 'POST'],
+}));
 app.use(express.json());
 
 // ✅ Validate required environment variables
@@ -25,22 +30,14 @@ requiredEnv.forEach((key) => {
   }
 });
 
-const cors = require('cors');
-app.use(cors({
-  origin: '*', // For development, allow all
-  methods: ['GET', 'POST'],
-}));
-console.error('❌ Error handling emergency request:', err.message, err.stack);
-
-
 // ✅ PostgreSQL pool setup
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: {
     require: true,
-    rejectUnauthorized: false, // <== needed for self-signed
+    rejectUnauthorized: false, // Allows self-signed cert
   },
-})
+});
 
 // ✅ Twilio client setup
 const twilioClient = twilio(
@@ -55,7 +52,7 @@ async function getAddressFromCoordinates(lat, lng) {
     const res = await axios.get(url);
     return res.data?.results?.[0]?.formatted_address || 'Unknown location';
   } catch (err) {
-    console.error('Geocoding error:', err.message);
+    console.error('❌ Geocoding error:', err.message, err.stack);
     return 'Unknown location';
   }
 }
@@ -65,20 +62,24 @@ app.post('/api/emergency', async (req, res) => {
   const { name, phone, issue, vehicle, latitude, longitude } = req.body;
 
   if (!name || !phone || !issue || !vehicle || !latitude || !longitude) {
+    console.warn('⚠️ Missing fields in request:', req.body);
     return res.status(400).send('Missing fields');
   }
 
   try {
-    // Insert into DB
+    // Log incoming request
+    console.log('📥 New Emergency Request:', req.body);
+
+    // Insert into database
     await pool.query(
       'INSERT INTO emergency_requests (name, phone, issue, vehicle, latitude, longitude) VALUES ($1, $2, $3, $4, $5, $6)',
       [name.trim(), phone.trim(), issue.trim(), vehicle.trim(), latitude, longitude]
     );
 
-    // Reverse geocode location
+    // Get address via Google Maps
     const address = await getAddressFromCoordinates(latitude, longitude);
     const mapUrl = `https://www.google.com/maps?q=${latitude},${longitude}`;
-    const body = `🚨 New Emergency:
+    const message = `🚨 New Emergency:
 Name: ${name}
 Phone: ${phone}
 Issue: ${issue}
@@ -86,29 +87,28 @@ Vehicle: ${vehicle}
 Address: ${address}
 Map: ${mapUrl}`;
 
-    // Send WhatsApp via Twilio
+    // Send WhatsApp message via Twilio
     await twilioClient.messages.create({
       from: 'whatsapp:+14155238886',
       to: process.env.SHOP_WHATSAPP_NUMBER,
-      body,
+      body: message,
     });
 
     res.status(200).send('Notification sent');
   } catch (err) {
-    console.error('❌ Error handling emergency request:', err.message);
+    console.error('❌ Error handling emergency request:', err.message, err.stack);
     res.status(500).send('Server error');
   }
 });
 
-// ✅ Basic health check
+// ✅ Health Check Routes
 app.get('/', (req, res) => {
   res.send('🚀 Emergency Backend Running');
 });
 
-// ✅ DB health check
 app.get('/health', async (req, res) => {
   try {
-    const result = await pool.query('SELECT 1');
+    await pool.query('SELECT 1');
     res.status(200).json({ status: 'ok', db: 'connected' });
   } catch (err) {
     console.error('❌ DB health check failed:', err.message);
@@ -116,7 +116,7 @@ app.get('/health', async (req, res) => {
   }
 });
 
-// ✅ Start server
+// ✅ Start Server
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`✅ Server running on http://0.0.0.0:${PORT}`);
